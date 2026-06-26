@@ -185,6 +185,50 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "search_journal",
+        "description": (
+            "Search the decision journal for past entries related to specific players, "
+            "decision types, seasons, or keywords. Use this to surface relevant history "
+            "before making a new decision (e.g., 'have I traded this player before?', "
+            "'what did I think about this position last year?'). "
+            "Returns matching entries with full reasoning and outcome grades."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "keywords": {
+                    "type": "string",
+                    "description": "Search terms matched against title, reasoning, context, and decision text",
+                },
+                "decision_type": {
+                    "type": "string",
+                    "enum": ["trade", "waiver", "drop", "lineup", "cut", "other"],
+                    "description": "Filter by decision type (optional)",
+                },
+                "season": {
+                    "type": "string",
+                    "description": "Filter by season year, e.g. '2025' (optional)",
+                },
+                "grade": {
+                    "type": "string",
+                    "enum": ["A", "B", "C", "D", "F"],
+                    "description": "Filter by outcome grade (optional)",
+                },
+                "ungraded_only": {
+                    "type": "boolean",
+                    "description": "If true, return only entries without an outcome grade",
+                    "default": False,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max entries to return (default 10)",
+                    "default": 10,
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "analyze_trade",
         "description": (
             "Evaluate a proposed trade using dynasty value scoring. "
@@ -372,7 +416,7 @@ class ToolHandler:
         notes = inp.get("outcome_notes", "")
         conn = get_connection(self.cfg.db_path)
         with conn:
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE decision_journal
                 SET outcome_grade=?, outcome_notes=?, outcome_date=?
@@ -381,6 +425,8 @@ class ToolHandler:
                 (grade, notes, datetime.now(timezone.utc).isoformat(), entry_id),
             )
         conn.close()
+        if cur.rowcount == 0:
+            return json.dumps({"error": f"No journal entry with id={entry_id}"})
         return json.dumps({"graded": True, "id": entry_id, "grade": grade})
 
     def _handle_update_player_note(self, inp: dict) -> str:
@@ -431,6 +477,61 @@ class ToolHandler:
                     pass
         result.pop("raw_json", None)
         return json.dumps(result, default=str)
+
+    def _handle_search_journal(self, inp: dict) -> str:
+        keywords = (inp.get("keywords") or "").strip()
+        decision_type = inp.get("decision_type")
+        season = inp.get("season")
+        grade = inp.get("grade")
+        ungraded_only = inp.get("ungraded_only", False)
+        limit = inp.get("limit", 10)
+
+        conn = get_connection(self.cfg.db_path)
+        clauses: list[str] = []
+        params: list = []
+
+        if keywords:
+            clauses.append(
+                "(title LIKE ? OR reasoning LIKE ? OR context LIKE ? OR decision_made LIKE ?)"
+            )
+            kw = f"%{keywords}%"
+            params.extend([kw, kw, kw, kw])
+        if decision_type:
+            clauses.append("decision_type = ?")
+            params.append(decision_type)
+        if season:
+            clauses.append("season = ?")
+            params.append(season)
+        if grade:
+            clauses.append("outcome_grade = ?")
+            params.append(grade)
+        if ungraded_only:
+            clauses.append("outcome_grade IS NULL")
+
+        sql = "SELECT * FROM decision_journal"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += f" ORDER BY id DESC LIMIT {int(limit)}"
+
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+
+        entries = []
+        for row in rows:
+            entry = dict(row)
+            # Parse JSON fields
+            for field in ("options_considered", "assets_involved"):
+                if entry.get(field):
+                    try:
+                        entry[field] = json.loads(entry[field])
+                    except Exception:
+                        pass
+            entries.append(entry)
+
+        return json.dumps(
+            {"count": len(entries), "entries": entries},
+            default=str,
+        )
 
     def _handle_analyze_trade(self, inp: dict) -> str:
         from ffootball.agent.analysis import analyze_trade

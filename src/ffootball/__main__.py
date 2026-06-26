@@ -212,12 +212,36 @@ def doctor():
     # API connectivity check
     console.print("\nChecking Sleeper API...", end=" ")
     try:
-        import httpx
-        r = httpx.get("https://api.sleeper.app/v1/user/sleeperbot", timeout=5)
-        if r.status_code == 200:
-            console.print("[green]✓ reachable[/green]")
-        else:
-            console.print(f"[yellow]HTTP {r.status_code}[/yellow]")
+        import urllib.request
+        with urllib.request.urlopen(
+            "https://api.sleeper.app/v1/user/sleeperbot", timeout=5
+        ) as r:
+            if r.status == 200:
+                console.print("[green]✓ reachable[/green]")
+            else:
+                console.print(f"[yellow]HTTP {r.status}[/yellow]")
+    except Exception as e:
+        console.print(f"[red]✗ {e}[/red]")
+
+    console.print("\nChecking Anthropic API...", end=" ")
+    try:
+        import urllib.request
+        import urllib.error
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/models",
+            headers={
+                "x-api-key": cfg.anthropic_api_key or "test",
+                "anthropic-version": "2023-06-01",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                console.print(f"[green]✓ reachable (HTTP {r.status})[/green]")
+        except urllib.error.HTTPError as he:
+            if he.code in (401, 403):
+                console.print(f"[yellow]reachable (HTTP {he.code} — check API key)[/yellow]")
+            else:
+                console.print(f"[green]✓ reachable (HTTP {he.code})[/green]")
     except Exception as e:
         console.print(f"[red]✗ {e}[/red]")
         ok = False

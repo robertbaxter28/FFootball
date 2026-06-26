@@ -15,7 +15,10 @@ from datetime import datetime, timezone
 from ffootball.config import Config
 from ffootball.db.queries import get_config_value, set_config_value
 from ffootball.db.schema import get_connection
+from ffootball.log import get_logger
 from ffootball.sleeper import client as sleeper
+
+_logger = get_logger("sync")
 
 
 def _now() -> str:
@@ -24,6 +27,7 @@ def _now() -> str:
 
 def _log(msg: str) -> None:
     print(f"  {msg}")
+    _logger.info(msg)
 
 
 class SyncEngine:

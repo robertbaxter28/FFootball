@@ -178,6 +178,45 @@ def get_connection(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+# Migrations to run when upgrading from an older schema version.
+# Each entry is (from_version, to_version, list_of_sql_statements).
+MIGRATIONS: list[tuple[int, int, list[str]]] = [
+    (1, 2, [
+        # Added league_rosters table in v2
+        """
+        CREATE TABLE IF NOT EXISTS league_rosters (
+            roster_id    TEXT NOT NULL,
+            user_id      TEXT,
+            team_name    TEXT,
+            player_ids   TEXT NOT NULL,
+            synced_at    TEXT NOT NULL,
+            PRIMARY KEY (roster_id)
+        )
+        """,
+    ]),
+]
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """Apply any pending schema migrations, updating schema_version after each."""
+    from datetime import datetime, timezone
+
+    current = conn.execute(
+        "SELECT MAX(version) AS v FROM schema_version"
+    ).fetchone()
+    current_ver = current["v"] if current and current["v"] else 0
+
+    for from_ver, to_ver, stmts in MIGRATIONS:
+        if current_ver < to_ver and current_ver >= from_ver:
+            for stmt in stmts:
+                conn.execute(stmt)
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (to_ver, datetime.now(timezone.utc).isoformat()),
+            )
+            current_ver = to_ver
+
+
 def init_db(db_path: str | Path) -> None:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection(db_path)
@@ -189,8 +228,11 @@ def init_db(db_path: str | Path) -> None:
         ).fetchone()
         if not existing:
             from datetime import datetime, timezone
+            # Run any pending migrations first (for existing DBs), then stamp final version
+            _run_migrations(conn)
+            # Stamp the target version if not yet present
             conn.execute(
-                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (SCHEMA_VERSION, datetime.now(timezone.utc).isoformat()),
             )
     conn.close()

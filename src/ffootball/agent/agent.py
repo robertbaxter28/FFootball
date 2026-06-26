@@ -15,6 +15,9 @@ from ffootball.agent.tools import TOOL_DEFINITIONS, ToolHandler
 from ffootball.config import Config
 from ffootball.db.queries import get_config_value
 from ffootball.db.schema import get_connection
+from ffootball.log import get_logger
+
+_log = get_logger("agent")
 
 MODEL = "claude-opus-4-8"
 MAX_TOKENS = 4096
@@ -106,12 +109,19 @@ def _handle_slash(cmd: str, cfg: Config, handler: ToolHandler) -> bool:
     elif command == "/help":
         print(f"""
 {BOLD}Available commands:{RESET}
-  /sync [scope]        Sync from Sleeper API (full|league|players|roster|matchups|transactions)
-  /journal list        Show recent decision journal entries
-  /journal add         Interactively add a journal entry
-  /journal grade <id>  Grade a past journal entry
-  /help                Show this help
-  /quit                Exit
+  /sync [scope]              Sync from Sleeper API
+                             scope: full|league|players|roster|matchups|transactions
+
+  /journal list              Show recent decisions (last 20)
+  /journal list [type]       Filter by type: trade|waiver|drop|lineup|cut|other
+  /journal list [type] [yr]  Also filter by season year (e.g. 2025)
+  /journal view <id>         Full detail for one entry
+  /journal stats             Grade distribution and win-rate summary
+  /journal add               Guided entry for a new decision
+  /journal grade <id>        Retroactively grade a past decision
+
+  /help                      Show this help
+  /quit                      Exit
 """)
         return True
 
@@ -123,44 +133,180 @@ def _handle_slash(cmd: str, cfg: Config, handler: ToolHandler) -> bool:
         return True
 
     elif command == "/journal":
-        sub = parts[1].lower() if len(parts) > 1 else "list"
+        # /journal [sub] [arg1] [arg2]
+        all_parts = cmd.strip().split()
+        sub = all_parts[1].lower() if len(all_parts) > 1 else "list"
+
         if sub == "list":
-            _journal_list(cfg)
+            # Optional: /journal list [type] [season]
+            type_filter = all_parts[2] if len(all_parts) > 2 else None
+            season_filter = all_parts[3] if len(all_parts) > 3 else None
+            _journal_list(cfg, type_filter=type_filter, season_filter=season_filter)
+
+        elif sub == "view" and len(all_parts) > 2:
+            try:
+                _journal_view(cfg, int(all_parts[2]))
+            except ValueError:
+                print("Usage: /journal view <id>")
+
+        elif sub == "stats":
+            _journal_stats(cfg)
+
         elif sub == "add":
             _journal_add(cfg, handler)
-        elif sub == "grade" and len(parts) > 2:
+
+        elif sub == "grade" and len(all_parts) > 2:
             try:
-                entry_id = int(parts[2])
-                _journal_grade(cfg, handler, entry_id)
+                _journal_grade(cfg, handler, int(all_parts[2]))
             except ValueError:
                 print("Usage: /journal grade <id>")
+
         else:
-            print("Usage: /journal list | /journal add | /journal grade <id>")
+            print("Usage: /journal list|view|stats|add|grade — try /help for details")
         return True
 
     return False
 
 
-def _journal_list(cfg: Config) -> None:
+_GRADE_COLOR = {"A": GREEN, "B": CYAN, "C": YELLOW, "D": YELLOW, "F": "\033[31m"}
+
+
+def _journal_list(
+    cfg: Config,
+    type_filter: str | None = None,
+    season_filter: str | None = None,
+) -> None:
     conn = get_connection(cfg.db_path)
-    rows = conn.execute(
-        """
-        SELECT id, created_at, decision_type, title, outcome_grade
-        FROM decision_journal
-        ORDER BY id DESC LIMIT 20
-        """
-    ).fetchall()
+    sql = "SELECT id, created_at, decision_type, title, outcome_grade, season, tags FROM decision_journal"
+    params: list = []
+    clauses: list[str] = []
+    if type_filter:
+        clauses.append("decision_type = ?")
+        params.append(type_filter.lower())
+    if season_filter:
+        clauses.append("season = ?")
+        params.append(season_filter)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY id DESC LIMIT 30"
+    rows = conn.execute(sql, params).fetchall()
     conn.close()
+
+    if not rows:
+        filter_desc = ""
+        if type_filter:
+            filter_desc += f" type={type_filter}"
+        if season_filter:
+            filter_desc += f" season={season_filter}"
+        print(f"\nNo journal entries{filter_desc}.\n")
+        return
+
+    header = "Decision Journal"
+    if type_filter or season_filter:
+        header += f" [{type_filter or 'all'}"
+        if season_filter:
+            header += f" · {season_filter}"
+        header += "]"
+
+    print(f"\n{BOLD}{header}{RESET}  ({len(rows)} entries)")
+    print(f"{'ID':>4}  {'Date':10}  {'Type':12}  {'Season':6}  {'Grade':5}  Title")
+    print("─" * 75)
+    for row in rows:
+        date = (row["created_at"] or "")[:10]
+        grade = row["outcome_grade"] or "—"
+        color = _GRADE_COLOR.get(grade, "")
+        grade_str = f"{color}{grade}{RESET}" if color else grade
+        season = row["season"] or "—"
+        dtype = (row["decision_type"] or "")[:12]
+        print(f"{row['id']:>4}  {date:10}  {dtype:12}  {season:6}  {grade_str:5}  {row['title']}")
+    print()
+
+
+def _journal_view(cfg: Config, entry_id: int) -> None:
+    conn = get_connection(cfg.db_path)
+    row = conn.execute(
+        "SELECT * FROM decision_journal WHERE id=?", (entry_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        print(f"No entry with ID {entry_id}.\n")
+        return
+
+    print(f"\n{BOLD}Journal Entry #{row['id']}{RESET}")
+    print("─" * 60)
+    print(f"  Title:    {row['title']}")
+    print(f"  Type:     {row['decision_type']}")
+    print(f"  Date:     {(row['created_at'] or '')[:10]}  Season: {row['season'] or '—'}  Week: {row['week'] or '—'}")
+    if row["context"]:
+        print(f"\n  Context:\n    {row['context']}")
+    if row["options_considered"]:
+        try:
+            import json
+            opts = json.loads(row["options_considered"])
+            if opts:
+                print(f"\n  Options considered:")
+                for o in opts:
+                    print(f"    • {o}")
+        except Exception:
+            pass
+    print(f"\n  Decision: {row['decision_made']}")
+    if row["reasoning"]:
+        print(f"\n  Reasoning:\n    {row['reasoning']}")
+    if row["tags"]:
+        print(f"\n  Tags: {row['tags']}")
+    if row["outcome_grade"]:
+        color = _GRADE_COLOR.get(row["outcome_grade"], "")
+        print(f"\n  Outcome grade: {color}{row['outcome_grade']}{RESET}")
+        if row["outcome_notes"]:
+            print(f"  Outcome notes: {row['outcome_notes']}")
+        if row["outcome_date"]:
+            print(f"  Graded on: {(row['outcome_date'] or '')[:10]}")
+    else:
+        print(f"\n  {DIM}Not yet graded — use /journal grade {row['id']}{RESET}")
+    print()
+
+
+def _journal_stats(cfg: Config) -> None:
+    conn = get_connection(cfg.db_path)
+    rows = conn.execute("SELECT outcome_grade, decision_type FROM decision_journal").fetchall()
+    conn.close()
+
     if not rows:
         print("\nNo journal entries yet.\n")
         return
-    print(f"\n{BOLD}Decision Journal (last 20):{RESET}")
-    print(f"{'ID':>4}  {'Date':10}  {'Type':12}  {'Grade':5}  Title")
-    print("-" * 70)
-    for row in rows:
-        date = (row["created_at"] or "")[:10]
-        grade = row["outcome_grade"] or "-"
-        print(f"{row['id']:>4}  {date:10}  {row['decision_type']:12}  {grade:5}  {row['title']}")
+
+    total = len(rows)
+    graded = [r for r in rows if r["outcome_grade"]]
+    grade_counts: dict[str, int] = {}
+    for r in graded:
+        g = r["outcome_grade"]
+        grade_counts[g] = grade_counts.get(g, 0) + 1
+
+    type_counts: dict[str, int] = {}
+    for r in rows:
+        t = r["decision_type"] or "other"
+        type_counts[t] = type_counts.get(t, 0) + 1
+
+    wins = grade_counts.get("A", 0) + grade_counts.get("B", 0)
+    losses = grade_counts.get("D", 0) + grade_counts.get("F", 0)
+    win_rate = f"{wins / len(graded) * 100:.0f}%" if graded else "—"
+
+    print(f"\n{BOLD}Decision Journal Stats{RESET}")
+    print("─" * 40)
+    print(f"  Total entries:   {total}")
+    print(f"  Graded:          {len(graded)} / {total}")
+    print(f"  Win rate (A/B):  {win_rate}")
+    print()
+    print(f"  Grade breakdown:")
+    for g in ("A", "B", "C", "D", "F"):
+        count = grade_counts.get(g, 0)
+        bar = "█" * count
+        color = _GRADE_COLOR.get(g, "")
+        print(f"    {color}{g}{RESET}  {bar} {count}")
+    print()
+    print(f"  By decision type:")
+    for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
+        print(f"    {t:12}  {c}")
     print()
 
 
@@ -260,7 +406,11 @@ def _load_startup_context(cfg: Config) -> tuple[str, str]:
 
 
 def run_chat(cfg: Config) -> None:
+    from ffootball.log import setup_logging
+    setup_logging(cfg.db_path)
+
     _print_banner()
+    _log.info("Chat session started")
 
     handler = ToolHandler(cfg)
     league_ctx, strategy_ctx = _load_startup_context(cfg)
@@ -273,6 +423,7 @@ def run_chat(cfg: Config) -> None:
             user_input = input(f"{BOLD}You:{RESET} ").strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{CYAN}Goodbye.{RESET}\n")
+            _log.info("Chat session ended (interrupt)")
             break
 
         if not user_input:
@@ -282,6 +433,8 @@ def run_chat(cfg: Config) -> None:
         if user_input.startswith("/"):
             _handle_slash(user_input, cfg, handler)
             continue
+
+        _log.debug("User: %s", user_input[:120])
 
         # Add user message
         messages.append({"role": "user", "content": user_input})
