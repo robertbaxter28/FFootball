@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DDL = [
     """
@@ -151,11 +151,22 @@ DDL = [
         updated_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS league_rosters (
+        roster_id    TEXT NOT NULL,
+        user_id      TEXT,
+        team_name    TEXT,
+        player_ids   TEXT NOT NULL,  -- JSON array of player_ids on this roster
+        synced_at    TEXT NOT NULL,
+        PRIMARY KEY (roster_id)
+    )
+    """,
 ]
 
 CORE_TABLES = [
     "config", "league_settings", "players", "roster", "draft_picks",
-    "matchups", "transactions", "decision_journal", "player_notes", "context_files",
+    "matchups", "transactions", "decision_journal", "player_notes",
+    "context_files", "league_rosters",
 ]
 
 

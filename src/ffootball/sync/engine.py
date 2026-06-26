@@ -53,6 +53,8 @@ class SyncEngine:
             r, p = self._sync_roster()
             results["roster"] = r
             results["draft_picks"] = p
+            print("Syncing all league rosters...")
+            results["league_rosters"] = self._sync_league_rosters()
 
         if scope in ("full", "matchups"):
             print("Syncing matchups...")
@@ -398,4 +400,39 @@ class SyncEngine:
             set_config_value(self.conn, "last_sync_transactions", now)
 
         _log(f"Transactions: {count} records (last {weeks} weeks)")
+        return count
+
+    # ------------------------------------------------------------------
+    # All league rosters (for waiver/free agent analysis)
+    # ------------------------------------------------------------------
+
+    def _sync_league_rosters(self) -> int:
+        league_id = self.cfg.sleeper_league_id
+        rosters = sleeper.get_rosters(league_id)
+        users = sleeper.get_users(league_id)
+        user_map = {u["user_id"]: u for u in (users or [])}
+
+        now = _now()
+        count = 0
+        with self.conn:
+            self.conn.execute("DELETE FROM league_rosters")
+            for r in rosters:
+                roster_id = str(r.get("roster_id", ""))
+                owner_id = r.get("owner_id") or ""
+                user = user_map.get(owner_id, {})
+                team_name = (
+                    user.get("metadata", {}).get("team_name")
+                    or user.get("display_name")
+                    or owner_id
+                )
+                player_ids = (r.get("players") or []) + (r.get("taxi") or []) + (r.get("reserve") or [])
+                self.conn.execute(
+                    """
+                    INSERT INTO league_rosters (roster_id, user_id, team_name, player_ids, synced_at)
+                    VALUES (?,?,?,?,?)
+                    """,
+                    (roster_id, owner_id, team_name, json.dumps(player_ids), now),
+                )
+                count += 1
+        _log(f"League rosters: {count} teams synced")
         return count

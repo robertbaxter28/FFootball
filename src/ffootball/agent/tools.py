@@ -184,6 +184,89 @@ TOOL_DEFINITIONS = [
             "required": [],
         },
     },
+    {
+        "name": "analyze_trade",
+        "description": (
+            "Evaluate a proposed trade using dynasty value scoring. "
+            "Computes value scores for all players and picks on both sides using age curves, "
+            "positional scarcity, and personal grades. Returns verdict, delta score, "
+            "positives, concerns, and positional impact. "
+            "Use player_ids from the players table (query_database first if unsure of IDs)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "players_giving": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Sleeper player_ids you are trading away",
+                },
+                "players_receiving": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Sleeper player_ids you are receiving",
+                },
+                "picks_giving": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "season": {"type": "string"},
+                            "round": {"type": "integer"},
+                        },
+                    },
+                    "description": "Draft picks you are trading away",
+                    "default": [],
+                },
+                "picks_receiving": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "season": {"type": "string"},
+                            "round": {"type": "integer"},
+                        },
+                    },
+                    "description": "Draft picks you are receiving",
+                    "default": [],
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_roster_analysis",
+        "description": (
+            "Analyze your current roster construction: positional counts, age distribution "
+            "(young/prime/vet buckets), grade distribution, surplus/deficit by position, "
+            "and players flagged for sell/buy/cut. Use this to identify roster needs before "
+            "making trade or waiver decisions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_ktc_ranking",
+        "description": (
+            "Rank all rostered players by dynasty value score (0–100) combining personal "
+            "grade, age-value curve, and positional scarcity. Use this for Keep/Trade/Cut "
+            "decisions, identifying your best assets, and finding cut/trade candidates. "
+            "Returns a ranked list from most to least valuable."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "position_filter": {
+                    "type": "string",
+                    "description": "Optional: filter by position (QB/RB/WR/TE). Leave empty for all.",
+                }
+            },
+            "required": [],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -340,12 +423,94 @@ class ToolHandler:
         if not row:
             return json.dumps({"error": "No league settings found — run sync first."})
         result = dict(row)
-        # Parse JSON columns for readability
         for col in ("roster_positions", "scoring_settings"):
             if result.get(col):
                 try:
                     result[col] = json.loads(result[col])
                 except Exception:
                     pass
-        result.pop("raw_json", None)  # too large to include
+        result.pop("raw_json", None)
         return json.dumps(result, default=str)
+
+    def _handle_analyze_trade(self, inp: dict) -> str:
+        from ffootball.agent.analysis import analyze_trade
+        from ffootball.db.queries import get_config_value
+
+        conn = get_connection(self.cfg.db_path)
+        is_sf = self._is_superflex(conn)
+        season = get_config_value(conn, "current_season") or self.cfg.sleeper_season
+
+        result = analyze_trade(
+            conn=conn,
+            players_giving=inp.get("players_giving") or [],
+            players_receiving=inp.get("players_receiving") or [],
+            picks_giving=inp.get("picks_giving") or [],
+            picks_receiving=inp.get("picks_receiving") or [],
+            current_season=season,
+            is_superflex=is_sf,
+        )
+        conn.close()
+        from dataclasses import asdict
+        return json.dumps(asdict(result), default=str)
+
+    def _handle_get_roster_analysis(self, inp: dict) -> str:
+        from ffootball.agent.analysis import get_roster_analysis
+        from dataclasses import asdict
+
+        conn = get_connection(self.cfg.db_path)
+        is_sf = self._is_superflex(conn)
+
+        # Get roster positions from league settings if available
+        row = conn.execute(
+            "SELECT roster_positions FROM league_settings ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        roster_positions = []
+        if row and row["roster_positions"]:
+            try:
+                roster_positions = json.loads(row["roster_positions"])
+            except Exception:
+                pass
+
+        analysis = get_roster_analysis(conn, is_sf, roster_positions)
+        conn.close()
+
+        result = asdict(analysis)
+        # Convert list of PositionalNeeds dataclasses (already converted by asdict)
+        return json.dumps(result, default=str)
+
+    def _handle_get_ktc_ranking(self, inp: dict) -> str:
+        from ffootball.agent.analysis import get_ktc_ranking
+
+        conn = get_connection(self.cfg.db_path)
+        is_sf = self._is_superflex(conn)
+        ranked = get_ktc_ranking(conn, is_sf)
+        conn.close()
+
+        pos_filter = (inp.get("position_filter") or "").upper()
+        if pos_filter:
+            ranked = [p for p in ranked if (p.position or "").upper() == pos_filter]
+
+        from dataclasses import asdict
+        return json.dumps(
+            {
+                "count": len(ranked),
+                "players": [asdict(p) for p in ranked],
+            },
+            default=str,
+        )
+
+    # ------------------------------------------------------------------
+    # Helper: detect superflex league from roster_positions
+    # ------------------------------------------------------------------
+
+    def _is_superflex(self, conn) -> bool:
+        row = conn.execute(
+            "SELECT roster_positions FROM league_settings ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not row or not row["roster_positions"]:
+            return False
+        try:
+            positions = json.loads(row["roster_positions"])
+            return "SUPER_FLEX" in positions or "SF" in positions
+        except Exception:
+            return False
