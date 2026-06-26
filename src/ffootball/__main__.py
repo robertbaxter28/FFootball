@@ -45,6 +45,29 @@ def setup():
     init_db(cfg.db_path)
     console.print(f"[green]✓[/green] Initialized database at [bold]{cfg.db_path}[/bold]")
 
+    # Resolve user_id from Sleeper and store it
+    console.print("Fetching your Sleeper user ID...")
+    try:
+        from ffootball.sleeper.client import get_user, SleeperAPIError
+        from ffootball.db.schema import get_connection
+        from ffootball.db.queries import set_config_value
+        user = get_user(cfg.sleeper_username)
+        user_id = user.get("user_id", "")
+        if user_id:
+            conn = get_connection(cfg.db_path)
+            with conn:
+                set_config_value(conn, "user_id", user_id)
+                set_config_value(conn, "sleeper_username", cfg.sleeper_username)
+                set_config_value(conn, "league_id", cfg.sleeper_league_id)
+                set_config_value(conn, "current_season", cfg.sleeper_season)
+            conn.close()
+            console.print(f"[green]✓[/green] User ID: [bold]{user_id}[/bold]")
+        else:
+            console.print("[yellow]⚠[/yellow]  Could not resolve user_id — check your username")
+    except Exception as e:
+        console.print(f"[yellow]⚠[/yellow]  Could not reach Sleeper API: {e}")
+        console.print("  (This is fine — run [cyan]ffootball sync[/cyan] once you have network access)")
+
     results = verify_schema(cfg.db_path)
     table = Table(title="Database Tables", show_header=True)
     table.add_column("Table")
@@ -74,8 +97,47 @@ def sync(scope):
         raise SystemExit(1)
 
     from ffootball.sync.engine import SyncEngine
+    from ffootball.db.schema import get_connection
+    from ffootball.db.queries import set_config_value
+
+    # Ensure user_id is set (needed for roster sync)
+    conn = get_connection(cfg.db_path)
+    from ffootball.db.queries import get_config_value
+    user_id = get_config_value(conn, "user_id")
+    conn.close()
+
+    if not user_id:
+        console.print("Resolving Sleeper user ID...")
+        try:
+            from ffootball.sleeper.client import get_user
+            user = get_user(cfg.sleeper_username)
+            uid = user.get("user_id", "")
+            if uid:
+                conn = get_connection(cfg.db_path)
+                with conn:
+                    set_config_value(conn, "user_id", uid)
+                    set_config_value(conn, "sleeper_username", cfg.sleeper_username)
+                    set_config_value(conn, "league_id", cfg.sleeper_league_id)
+                    set_config_value(conn, "current_season", cfg.sleeper_season)
+                conn.close()
+                console.print(f"[green]✓[/green] user_id: {uid}")
+        except Exception as e:
+            console.print(f"[red]Failed to resolve user_id:[/red] {e}")
+            raise SystemExit(1)
+
     engine = SyncEngine(cfg)
-    engine.sync(scope=scope)
+    try:
+        results = engine.sync(scope=scope)
+    finally:
+        engine.close()
+
+    table = Table(title=f"Sync Results ({scope})", show_header=True)
+    table.add_column("Scope")
+    table.add_column("Records", justify="right")
+    for k, v in results.items():
+        table.add_row(k, str(v))
+    console.print(table)
+    console.print("[bold green]Sync complete.[/bold green]")
 
 
 @cli.command()

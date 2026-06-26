@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "dynasty.db"
@@ -10,9 +9,28 @@ ENV_PATH = PROJECT_ROOT / ".env"
 REQUIRED_KEYS = ["ANTHROPIC_API_KEY", "SLEEPER_USERNAME", "SLEEPER_LEAGUE_ID", "SLEEPER_SEASON"]
 
 
+def _load_dotenv(path: Path) -> None:
+    """Load .env file into os.environ. Falls back to manual parsing if python-dotenv unavailable."""
+    try:
+        from dotenv import load_dotenv as _ld
+        _ld(path)
+    except ImportError:
+        # Manual .env parsing (stdlib fallback)
+        if not path.exists():
+            return
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            os.environ.setdefault(k, v)
+
+
 class Config:
     def __init__(self):
-        load_dotenv(ENV_PATH)
+        _load_dotenv(ENV_PATH)
         self.anthropic_api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
         self.sleeper_username: str = os.environ.get("SLEEPER_USERNAME", "")
         self.sleeper_league_id: str = os.environ.get("SLEEPER_LEAGUE_ID", "")

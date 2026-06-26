@@ -58,7 +58,7 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_players_name ON players(full_name)",
     """
     CREATE TABLE IF NOT EXISTS roster (
-        player_id         TEXT PRIMARY KEY REFERENCES players(player_id),
+        player_id         TEXT PRIMARY KEY,
         roster_slot       TEXT,
         acquisition_type  TEXT,
         acquisition_date  TEXT,
@@ -134,7 +134,7 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_journal_season ON decision_journal(season, week)",
     """
     CREATE TABLE IF NOT EXISTS player_notes (
-        player_id      TEXT PRIMARY KEY REFERENCES players(player_id),
+        player_id      TEXT PRIMARY KEY,
         dynasty_grade  TEXT,
         action_flag    TEXT,
         trade_value    INTEGER,
