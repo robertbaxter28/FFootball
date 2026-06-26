@@ -1,0 +1,19 @@
+# Environment and secrets
+.env
+
+# Generated data (sync cache, DB)
+data/
+context/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Logs
+*.log
